@@ -1,0 +1,16 @@
+services:
+  nutricare:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      - NUTRICARE_DB=/app/data/nutricare.db
+      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - nutricare-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  nutricare-data:

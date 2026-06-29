@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NutriCare AI · Physician</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Tajawal:wght@400;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><div class="logo">غ</div><span data-t="appName">NutriCare AI</span></div>
+      <nav class="nav" id="nav">
+        <a data-page="dashboard" class="active">📊 <span data-t="dashboard">Dashboard</span></a>
+        <a data-page="patients">👥 <span data-t="patients">Patients</span></a>
+        <a data-page="risk">🎯 <span data-t="risk">Risk Prediction</span></a>
+        <a data-page="aibot">🤖 <span data-t="aiBot">AI Assistant</span></a>
+        <a data-page="foods">🍽️ <span data-t="foods">Food Database</span></a>
+        <a data-page="modules">🏥 <span data-t="modules">Disease Modules</span></a>
+        <a data-page="appointments">📅 <span data-t="appointments">Appointments</span></a>
+      </nav>
+      <p class="disclaimer" data-t="disclaimer"></p>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div><h2 id="pageTitle" data-t="dashboard">Dashboard</h2><span class="muted" id="who"></span></div>
+        <div class="row" style="gap:8px">
+          <button class="btn btn-sm" id="langBtn">العربية</button>
+          <button class="btn btn-sm" id="themeBtn">🌙</button>
+          <button class="btn btn-sm" id="logout" data-t="signOut">Sign out</button>
+        </div>
+      </div>
+      <div id="content"></div>
+    </main>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/app.js"></script>
+  <script>
+  const { t, api, esc, riskGauge, requireAuth } = NC;
+  const u = requireAuth('physician'); if (u) document.getElementById('who').textContent = u.name;
+  const C = document.getElementById('content');
+  let PATIENTS = [], MODULES = {};
+
+  langBtn.onclick = () => { const n = NC.getLang() === 'en' ? 'ar' : 'en'; NC.setLang(n); langBtn.textContent = n === 'en' ? 'العربية' : 'English'; render(); };
+  themeBtn.onclick = NC.toggleTheme; logout.onclick = NC.logout;
+  NC.onLangChange = () => { document.getElementById('pageTitle').textContent = t(current); };
+
+  document.getElementById('nav').addEventListener('click', e => {
+    const a = e.target.closest('a'); if (!a) return;
+    document.querySelectorAll('.nav a').forEach(x => x.classList.remove('active'));
+    a.classList.add('active'); current = a.dataset.page; document.getElementById('pageTitle').textContent = t(current); render();
+  });
+  let current = 'dashboard';
+  let detailId = null; // set while viewing a patient profile
+
+  // Background sync: refresh the open patient's live widgets in place (never
+  // navigate away from the detail view); otherwise refresh the current list.
+  NC.connectSocket((ev, d) => {
+    if (detailId) { refreshDetail(d); return; }
+    if (ev === 'adherence-updated' || ev === 'notification') {
+      if (current === 'dashboard') { loadAdherenceBoard(); NC.toast(t('notifications')+' ↻', 'info', 1800); }
+      return;
+    }
+    if (['patient-updated','patient-activity','patient-deleted','assessment-saved','appointment-created','appointment-updated','message'].includes(ev)) {
+      if (current === 'dashboard' || current === 'patients') loadAndRender();
+    }
+  });
+  function refreshDetail(d) {
+    if (!detailId) return;
+    if (d && d.patientId && d.patientId !== detailId) return; // unrelated patient
+    if (document.getElementById('msgs')) loadMessages(detailId);
+    if (document.getElementById('asmtList')) loadAssessments(detailId);
+    if (document.getElementById('dnList')) loadDoctorNotes(detailId);
+    if (document.getElementById('fuList')) loadFollowups(detailId);
+  }
+
+  async function loadAndRender() { PATIENTS = await api('/patients'); render(); }
+  async function render() {
+    detailId = null; // leaving any detail view
+    if (current === 'dashboard') return renderDashboard();
+    if (current === 'patients') return renderPatients();
+    if (current === 'risk') return renderRisk();
+    if (current === 'aibot') return renderAiBot();
+    if (current === 'foods') return renderFoods();
+    if (current === 'modules') return renderModules();
+    if (current === 'appointments') return renderAppointments();
+  }
+
+  function tierBadge(r) { return `<span class="badge tier-${r.tier.key}">${r.score} · ${t(r.tier.key) || r.tier.label}</span>`; }
+
+  async function renderDashboard() {
+    const s = await api('/dashboard/stats');
+    const tiers = s.riskTiers;
+    C.innerHTML = `
+      <div class="kpis">
+        <div class="card kpi"><div class="v">${s.totalPatients}</div><div class="l" data-t="totalPatients">Total Patients</div></div>
+        <div class="card kpi"><div class="v" style="color:var(--high)">${s.highRisk}</div><div class="l" data-t="highRisk">High-Risk</div></div>
+        <div class="card kpi"><div class="v">${s.avgAdherence}%</div><div class="l" data-t="adherence">Avg Adherence</div></div>
+        <div class="card kpi"><div class="v">${s.neonatal}</div><div class="l" data-t="neonatal">Neonatal</div></div>
+        <div class="card kpi"><div class="v">${s.upcomingAppointments}</div><div class="l" data-t="appointments">Appointments</div></div>
+      </div>
+      <div class="row">
+        <div class="card grow" style="min-width:300px">
+          <h3 data-t="riskScore">Malnutrition Risk distribution</h3>
+          ${['low','moderate','high','critical'].map(k => {
+            const n = tiers[k], pct = s.totalPatients ? Math.round(n/s.totalPatients*100):0;
+            return `<div style="margin:10px 0"><div style="display:flex;justify-content:space-between;font-size:13px"><span class="badge tier-${k}">${t(k)||k}</span><b>${n}</b></div>
+              <div style="height:8px;background:var(--surface-2);border-radius:6px;overflow:hidden;margin-top:5px"><div style="width:${pct}%;height:100%;background:var(--${k})"></div></div></div>`;
+          }).join('')}
+        </div>
+        <div class="card grow" style="min-width:300px">
+          <h3 data-t="modules">Disease Modules</h3>
+          ${Object.entries(s.diseaseBreakdown).map(([k,v]) => `<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border)"><span>${esc(k)}</span><b>${v}</b></div>`).join('')}
+        </div>
+      </div>
+      <div class="row" style="margin-top:16px">
+        <div class="card grow" style="min-width:320px">
+          <h3>📊 <span data-t="ranking">Adherence ranking</span></h3>
+          <div id="adhRank"><p class="muted">…</p></div>
+        </div>
+        <div class="card grow" style="min-width:300px">
+          <h3 style="color:var(--high)">⚠ <span data-t="nonCompliant">Non-compliant patients</span></h3>
+          <div id="nonComp"></div>
+          <h3 style="margin-top:14px">🔔 <span data-t="notifications">Notifications</span></h3>
+          <div id="notif" style="max-height:200px;overflow:auto"></div>
+        </div>
+      </div>`;
+    NC.setLang(NC.getLang());
+    loadAdherenceBoard();
+  }
+  async function loadAdherenceBoard() {
+    const [d, notifs] = await Promise.all([api('/dashboard/adherence'), api('/notifications')]);
+    const rank = document.getElementById('adhRank'); if (!rank) return;
+    rank.innerHTML = `<table><thead><tr><th data-t="name">Name</th><th data-t="adherence">Score</th><th>Trend</th></tr></thead><tbody>
+      ${d.ranking.map(r=>`<tr><td>${esc(r.name)} <span class="muted" style="font-size:11px">${esc(r.module||'')}</span></td>
+        <td><span class="badge tier-${r.category==='High'?'low':r.category==='Medium'?'moderate':'critical'}">${r.score}%</span></td>
+        <td style="color:${r.trend>=0?'var(--low)':'var(--critical)'}">${r.trend>=0?'▲':'▼'} ${Math.abs(r.trend)}</td></tr>`).join('')}
+      </tbody></table><div class="muted" style="font-size:12px;margin-top:6px">Avg ${d.avg}%</div>`;
+    document.getElementById('nonComp').innerHTML = d.nonCompliant.length
+      ? d.nonCompliant.map(x=>`<div class="explain" style="border-inline-start-color:var(--critical)"><b>${esc(x.name)}</b> — ${x.score}% <span class="badge tier-critical">${x.category}</span></div>`).join('')
+      : `<p class="muted">${t('noData')}</p>`;
+    document.getElementById('notif').innerHTML = notifs.length
+      ? notifs.slice(0,8).map(n=>`<div class="explain" style="${n.read?'':'border-inline-start-color:var(--accent)'}"><div style="font-size:13px">${esc(n.body)}</div><div class="muted" style="font-size:11px">${new Date(n.ts).toLocaleString()}</div></div>`).join('')
+      : `<p class="muted">${t('noData')}</p>`;
+    NC.setLang(NC.getLang());
+  }
+
+  const PT = { search: '', filter: '', sort: 'name', dir: 1, page: 1, size: 8 };
+  async function renderPatients() {
+    PATIENTS = await api('/patients');
+    C.innerHTML = `
+      <div class="toolbar">
+        <input id="pSearch" data-tph="search" value="${esc(PT.search)}" style="min-width:220px"/>
+        <select id="pFilter">
+          <option value="" data-t="allRisk">All risk levels</option>
+          <option value="critical">Critical</option><option value="high">High</option>
+          <option value="moderate">Moderate</option><option value="low">Low</option>
+        </select>
+        <select id="pSort">
+          <option value="name" data-t="name">Name</option>
+          <option value="risk" data-t="riskScore">Risk score</option>
+          <option value="adherence" data-t="adherence">Adherence</option>
+          <option value="updated">Latest assessment</option>
+        </select>
+        <span class="grow"></span>
+        <button class="btn btn-sm" id="pExport">⬇ <span data-t="exportCsv">Export CSV</span></button>
+        <button class="btn btn-primary" id="addPatientBtn">➕ <span data-t="addPatient">Add Patient</span></button>
+      </div>
+      <div class="card"><table><thead><tr>
+        <th class="sortable" data-sort="name" data-t="name">Name</th><th data-t="ageBmi">Age/BMI</th>
+        <th data-t="module">Module</th><th class="sortable" data-sort="risk" data-t="riskScore">Risk</th>
+        <th class="sortable" data-sort="adherence" data-t="adherence">Adh.</th><th></th></tr></thead>
+        <tbody id="pBody"></tbody></table>
+        <div class="pager" id="pPager"></div>
+      </div>`;
+    document.getElementById('pFilter').value = PT.filter;
+    document.getElementById('pSort').value = PT.sort;
+    NC.setLang(NC.getLang());
+    drawPatientRows();
+    document.getElementById('pSearch').oninput = (e) => { PT.search = e.target.value; PT.page = 1; drawPatientRows(); };
+    document.getElementById('pFilter').onchange = (e) => { PT.filter = e.target.value; PT.page = 1; drawPatientRows(); };
+    document.getElementById('pSort').onchange = (e) => { PT.sort = e.target.value; drawPatientRows(); };
+    C.querySelectorAll('th.sortable').forEach(th => th.onclick = () => {
+      const s = th.dataset.sort; PT.dir = (PT.sort === s) ? -PT.dir : 1; PT.sort = s; drawPatientRows();
+    });
+    document.getElementById('addPatientBtn').onclick = () => patientModal(null);
+    document.getElementById('pExport').onclick = () => NC.exportCSV('patients.csv', filteredPatients().map(p => ({
+      Name: p.name, Code: p.patientCode, Age: p.ageDisplay, Gender: p.gender, BMI: p.bmi,
+      Module: p.diseaseModule, Diagnosis: p.diagnosis, RiskScore: p.assessment.risk.score,
+      RiskTier: p.assessment.risk.tier.label, Adherence: p.adherence,
+    })));
+  }
+  function filteredPatients() {
+    let list = PATIENTS.slice();
+    if (PT.search) { const q = PT.search.toLowerCase(); list = list.filter(p => (p.name + ' ' + (p.patientCode||'') + ' ' + (p.diagnosis||'')).toLowerCase().includes(q)); }
+    if (PT.filter) list = list.filter(p => p.assessment.risk.tier.key === PT.filter);
+    const key = PT.sort;
+    list.sort((a, b) => {
+      let av, bv;
+      if (key === 'risk') { av = a.assessment.risk.score; bv = b.assessment.risk.score; }
+      else if (key === 'adherence') { av = a.adherence||0; bv = b.adherence||0; }
+      else if (key === 'updated') { av = a.updatedAt||''; bv = b.updatedAt||''; }
+      else { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
+      return av < bv ? -PT.dir : av > bv ? PT.dir : 0;
+    });
+    return list;
+  }
+  function drawPatientRows() {
+    const all = filteredPatients();
+    const pages = Math.max(1, Math.ceil(all.length / PT.size));
+    if (PT.page > pages) PT.page = pages;
+    const slice = all.slice((PT.page-1)*PT.size, PT.page*PT.size);
+    document.getElementById('pBody').innerHTML = slice.length ? slice.map(p => `<tr data-id="${p.id}">
+      <td><b>${esc(p.name)}</b><div class="muted" style="font-size:12px">${esc(p.patientCode||'')}</div></td>
+      <td>${esc(p.ageDisplay||'-')} · ${p.bmi||'-'}</td>
+      <td>${esc(p.diseaseModule||'-')}${p.neonatal?' 👶':''}</td>
+      <td>${tierBadge(p.assessment.risk)}</td>
+      <td>${p.adherence||0}%</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-sm pView" data-t="viewPatient">View</button>
+        <button class="btn btn-sm pEdit" title="Edit">✏️</button>
+        <button class="btn btn-sm pDel" title="Delete">🗑️</button></td></tr>`).join('')
+      : `<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">${t('noData')}</td></tr>`;
+    document.getElementById('pPager').innerHTML = all.length > PT.size
+      ? `<button class="btn btn-sm" id="pPrev" ${PT.page<=1?'disabled':''}>‹</button>
+         <span>${PT.page} / ${pages} · ${all.length}</span>
+         <button class="btn btn-sm" id="pNext" ${PT.page>=pages?'disabled':''}>›</button>` : `<span class="muted">${all.length} ${t('patients').toLowerCase()}</span>`;
+    NC.setLang(NC.getLang());
+    document.querySelectorAll('#pBody tr[data-id]').forEach(tr => {
+      const id = tr.dataset.id;
+      tr.querySelector('.pView').onclick = () => openPatient(id);
+      tr.querySelector('.pEdit').onclick = (e) => { e.stopPropagation(); const p = PATIENTS.find(x=>x.id===id); patientModal(p); };
+      tr.querySelector('.pDel').onclick = async (e) => { e.stopPropagation(); const p = PATIENTS.find(x=>x.id===id);
+        if (await NC.confirmDialog(`${t('deleteConfirm')} "${p.name}"?`, { title: t('addPatient') })) {
+          await api('/patients/'+id, { method:'DELETE' }); NC.toast(t('deleted'), 'success'); renderPatients();
+        }};
+    });
+    const prev = document.getElementById('pPrev'), next = document.getElementById('pNext');
+    if (prev) prev.onclick = () => { PT.page--; drawPatientRows(); };
+    if (next) next.onclick = () => { PT.page++; drawPatientRows(); };
+  }
+
+  // Add / Edit patient as a real modal (validation, inline errors, loading)
+  function patientModal(p) {
+    const isEdit = !!p;
+    const m = NC.modal(`
+      <div class="row">
+        <div class="field grow"><label data-t="name">Name *</label><input id="np_name" value="${esc(p?.name||'')}" ${isEdit?'disabled':''}/><div class="err" id="e_name"></div></div>
+        <div class="field grow"><label data-t="dob">Date of birth *</label><input type="date" id="np_dob" value="${esc(p?.birthday||'')}" ${isEdit?'disabled':''}/><div class="err" id="e_dob"></div></div>
+        <div class="field"><label>Gender</label><select id="np_gender"><option value="male" ${p?.gender==='male'?'selected':''}>male</option><option value="female" ${p?.gender==='female'?'selected':''}>female</option></select></div>
+      </div>
+      <div class="row">
+        <div class="field grow"><label data-t="height">Height (cm)</label><input type="number" id="np_h" value="${p?.heightCm??''}"/></div>
+        <div class="field grow"><label data-t="weight">Weight (kg)</label><input type="number" id="np_w" value="${p?.weightKg??''}"/><div class="muted" id="bmiHint" style="font-size:12px;margin-top:4px"></div></div>
+        <div class="field grow"><label data-t="diseaseModule">Disease module</label>
+          <select id="np_mod"><option value="">${t('none')}</option>${['CKD','Hepatic','Hyperlipidemia','IEM'].map(x=>`<option ${p?.diseaseModule===x?'selected':''}>${x}</option>`).join('')}</select></div>
+      </div>
+      <div class="row">
+        <div class="field grow"><label>Diagnosis</label><input id="np_dx" value="${esc(p?.diagnosis||'')}"/></div>
+        <div class="field grow"><label>Medications (comma-separated)</label><input id="np_meds" value="${esc(p?.medications||'')}" placeholder="Lisinopril, Atorvastatin"/></div>
+      </div>
+      <div class="row">
+        <div class="field grow"><label data-t="weightLoss">Weight loss %</label><input type="number" id="np_wl" value="${p?.weightLossPct??0}"/></div>
+        <div class="field grow"><label data-t="intakePct">Intake %</label><input type="number" id="np_in" value="${p?.intakePctOfNeeds??100}"/></div>
+        <div class="field grow"><label data-t="albumin">Albumin</label><input type="number" step="0.1" id="np_alb" value="${p?.albumin??''}"/></div>
+        <div class="field grow"><label>eGFR</label><input type="number" id="np_egfr" value="${p?.egfr??''}"/></div>
+      </div>
+      <h4 style="margin:6px 0" data-t="lifestylePillars">Lifestyle & vitals</h4>
+      <div class="row">
+        <div class="field grow"><label data-t="activityLevel">Activity level</label>
+          <select id="np_act">${['','sedentary','light','moderate','active'].map(x=>`<option value="${x}" ${p?.activityLevel===x?'selected':''}>${x||'—'}</option>`).join('')}</select></div>
+        <div class="field grow"><label data-t="dietType">Diet type</label><input id="np_diet" value="${esc(p?.dietType||'')}"/></div>
+        <div class="field grow"><label data-t="sleepHours">Sleep (hrs)</label><input type="number" step="0.5" id="np_sleep" value="${p?.sleepHours??''}"/></div>
+        <div class="field grow"><label data-t="waterGoal">Water goal (ml)</label><input type="number" id="np_water" value="${p?.waterGoalMl??2000}"/></div>
+      </div>
+      <div class="row">
+        <div class="field grow"><label data-t="bloodPressure">Blood pressure</label>
+          <div class="row" style="gap:4px"><input type="number" id="np_sys" placeholder="Sys" value="${p?.systolic??''}"/><input type="number" id="np_dia" placeholder="Dia" value="${p?.diastolic??''}"/></div></div>
+        <div class="field grow"><label data-t="bloodSugar">Blood sugar</label><input type="number" id="np_sugar" value="${p?.bloodSugar??''}"/></div>
+        <div class="field grow"><label data-t="stress">Stress (0–10)</label><input type="number" min="0" max="10" id="np_stress" value="${p?.stressLevel??''}"/></div>
+      </div>
+      <div class="row">
+        <div class="field grow"><label data-t="smoking">Smoking</label>
+          <select id="np_smoke">${['','never','former','current'].map(x=>`<option value="${x}" ${p?.smoking===x?'selected':''}>${x||'—'}</option>`).join('')}</select></div>
+        <div class="field grow"><label data-t="alcohol">Alcohol</label>
+          <select id="np_alc">${['','none','occasional','regular'].map(x=>`<option value="${x}" ${p?.alcohol===x?'selected':''}>${x||'—'}</option>`).join('')}</select></div>
+        <div class="field grow"><label>Family history</label><input id="np_fam" value="${esc(p?.familyHistory||'')}"/></div>
+        <div class="field grow"><label>Allergies</label><input id="np_alg" value="${esc(p?.allergies||'')}"/></div>
+      </div>
+      <div class="row" style="justify-content:flex-end;gap:8px;margin-top:6px">
+        <button class="btn nc-cancel" data-t="cancel">Cancel</button>
+        <button class="btn btn-primary" id="np_save">${isEdit ? t('save') : t('createPatient')}</button>
+      </div>`, { title: isEdit ? esc(p.name) : t('addPatient') });
+    NC.setLang(NC.getLang());
+    const bmiHint = m.body.querySelector('#bmiHint');
+    const calcBmi = () => { const h=+m.body.querySelector('#np_h').value, w=+m.body.querySelector('#np_w').value;
+      if (h>0&&w>0){ const b=(w/((h/100)**2)).toFixed(1); bmiHint.textContent = `BMI ${b}`; } else bmiHint.textContent=''; };
+    m.body.querySelector('#np_h').oninput = calcBmi; m.body.querySelector('#np_w').oninput = calcBmi; calcBmi();
+    m.body.querySelector('.nc-cancel').onclick = m.close;
+    m.body.querySelector('#np_save').onclick = async (e) => {
+      m.body.querySelectorAll('.err').forEach(x=>x.textContent='');
+      const name = m.body.querySelector('#np_name').value.trim(), dob = m.body.querySelector('#np_dob').value;
+      let bad = false;
+      if (!isEdit && !name) { m.body.querySelector('#e_name').textContent = t('required'); bad = true; }
+      if (!isEdit && !dob) { m.body.querySelector('#e_dob').textContent = t('required'); bad = true; }
+      if (bad) { NC.toast(t('fixErrors'), 'error'); return; }
+      const q = (id) => m.body.querySelector(id).value;
+      const body = { gender: q('#np_gender'), heightCm: q('#np_h'),
+        weightKg: q('#np_w'), diseaseModule: q('#np_mod') || null,
+        diagnosis: q('#np_dx'), medications: q('#np_meds'),
+        weightLossPct: q('#np_wl'), intakePctOfNeeds: q('#np_in'),
+        albumin: q('#np_alb'), egfr: q('#np_egfr'),
+        activityLevel: q('#np_act') || null, dietType: q('#np_diet'), sleepHours: q('#np_sleep') || null,
+        waterGoalMl: q('#np_water') || null, systolic: q('#np_sys') || null, diastolic: q('#np_dia') || null,
+        bloodSugar: q('#np_sugar') || null, stressLevel: q('#np_stress') || null,
+        smoking: q('#np_smoke') || null, alcohol: q('#np_alc') || null,
+        familyHistory: q('#np_fam'), allergies: q('#np_alg') };
+      await NC.withLoading(e.target, async () => {
+        try {
+          if (isEdit) { await api('/patients/'+p.id, { method:'PUT', body }); NC.toast(t('saved'), 'success'); }
+          else { body.name = name; body.birthday = dob; await api('/patients', { method:'POST', body }); NC.toast(t('createdPatient'), 'success'); }
+          m.close(); renderPatients();
+        } catch (err) { NC.toast(err.message, 'error'); }
+      });
+    };
+  }
+
+  async function renderAiBot() {
+    PATIENTS = await api('/patients');
+    C.innerHTML = `<div class="card">
+      <div class="row" style="gap:8px;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0">🤖 <span data-t="aiBot">AI Assistant</span></h3>
+        <span class="grow"></span>
+        <select id="aiPatient" style="max-width:280px"><option value="">${t('selectPatientFirst')}</option>
+          ${PATIENTS.map(p=>`<option value="${p.id}">${esc(p.name)} — ${esc(p.diseaseModule||'-')}</option>`).join('')}</select>
+      </div>
+      <div id="aiChat" style="max-height:48vh;overflow:auto;margin-bottom:10px"></div>
+      <div class="row" style="gap:6px">
+        <input id="aiMsg" data-tph="askPhysicianAI" class="grow"/>
+        <button class="btn btn-primary" id="aiSend" data-t="send">Send</button>
+      </div>
+      <div class="row" style="gap:6px;margin-top:8px">
+        ${['malnutrition risk','interpret labs','nutrient targets','foods to avoid','draft ADIME note'].map(q=>`<button class="chip aiQuick">${q}</button>`).join('')}
+      </div>
+      <p class="disclaimer" data-t="disclaimer"></p></div>`;
+    NC.setLang(NC.getLang());
+    const chat = document.getElementById('aiChat');
+    const ask = async (text) => {
+      const v = text || document.getElementById('aiMsg').value.trim(); if (!v) return;
+      const pid = document.getElementById('aiPatient').value;
+      chat.innerHTML += `<div class="msg patient">${esc(v)}</div>`; document.getElementById('aiMsg').value='';
+      chat.scrollTop = chat.scrollHeight;
+      const r = await api('/physician-assistant', { method:'POST', body:{ message:v, patientId:pid||undefined } });
+      chat.innerHTML += `<div class="msg physician" style="max-width:90%;white-space:pre-wrap">${esc(r.reply)}${r.sources&&r.sources[0]?`<div class="src" style="font-size:11px;opacity:.7;margin-top:4px">📖 ${esc(r.sources.join(' · '))}</div>`:''}</div>`;
+      chat.scrollTop = chat.scrollHeight;
+    };
+    document.getElementById('aiSend').onclick = () => ask();
+    document.getElementById('aiMsg').addEventListener('keydown', e => { if (e.key==='Enter') ask(); });
+    C.querySelectorAll('.aiQuick').forEach(b => b.onclick = () => ask(b.textContent));
+  }
+
+  async function openPatient(id) {
+    const p = await api('/patients/' + id);
+    const r = p.assessment.risk, tg = p.assessment.targets;
+    current = 'patients'; detailId = id; document.getElementById('pageTitle').textContent = p.name;
+    C.innerHTML = `
+      <div class="crumbs"><a id="crumbHome" data-t="dashboard">Dashboard</a><span>›</span><a id="crumbPts" data-t="patients">Patients</a><span>›</span><b>${esc(p.name)}</b></div>
+      <div class="toolbar">
+        <button class="btn btn-sm" id="back">← <span data-t="back">Back</span></button>
+        <span class="grow"></span>
+        <button class="btn btn-sm" id="pExportCsv">⬇ <span data-t="exportCsv">Export CSV</span></button>
+        <button class="btn btn-sm" id="report">📄 <span data-t="print">Print / PDF</span></button>
+        <button class="btn btn-sm" id="editP">✏️ <span data-t="save">Edit</span></button>
+      </div>
+      <div class="row">
+        <div class="card" style="min-width:230px;text-align:center">
+          ${riskGauge(r.score, r.tier.key)}
+          <div style="margin-top:8px">${tierBadge(r)}</div>
+          <p class="muted" style="font-size:13px">${esc(r.tier.action)}</p>
+          <div style="font-size:12px" class="muted">NRS-2002: <b>${r.nrs2002.score}</b> · GLIM: <b>${r.glim.diagnosed?'met':'not met'}</b> · ${t('confidence')}: ${Math.round(r.confidence*100)}%</div>
+        </div>
+        <div class="card grow" style="min-width:300px">
+          <h3>${esc(p.name)} <span class="muted" style="font-weight:400">${esc(p.ageDisplay||'')} · ${esc(p.gender||'')}</span></h3>
+          <p class="muted">${esc(p.diagnosis||'')}</p>
+          <div class="row">
+            <div class="chip">BMI ${p.bmi||'-'}</div><div class="chip">${esc(p.diseaseModule||'-')}</div>
+            ${p.ckdStage?`<div class="chip">CKD ${esc(p.ckdStage)}</div>`:''}
+            ${p.iemType?`<div class="chip">${esc(p.iemType)}</div>`:''}
+          </div>
+          <div class="kpis" style="margin-top:14px">
+            <div><div class="l" data-t="energyTarget">Energy</div><b>${tg.energyKcal} kcal</b></div>
+            <div><div class="l" data-t="proteinTarget">Protein</div><b>${tg.proteinG} g</b></div>
+            <div><div class="l" data-t="sodium">Sodium</div><b>&lt;${tg.sodiumMg} mg</b></div>
+            ${tg.potassiumMg?`<div><div class="l" data-t="potassium">Potassium</div><b>&lt;${tg.potassiumMg} mg</b></div>`:''}
+            ${tg.phosphorusMg?`<div><div class="l" data-t="phosphorus">Phosphorus</div><b>&lt;${tg.phosphorusMg} mg</b></div>`:''}
+            <div><div class="l" data-t="fluid">Fluid</div><b>${esc(tg.fluid)}</b></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3>🔍 <span data-t="whyTitle">Why this recommendation?</span></h3>
+        ${r.factors.length? r.factors.map(f => `<div class="explain"><b>${esc(f.label)}</b> (+${f.points}) — <span class="muted">${esc(f.value)}</span></div>`).join('') : `<p class="muted">${t('noData')}</p>`}
+        ${tg.explain.map(e => `<div class="explain"><b>${t('ruleFired')}:</b> ${esc(e.rule)}<div class="src">${t('sourceGuideline')}: ${esc(e.source)} · ${esc(e.version||'')} · ${esc(e.value||'')}</div></div>`).join('')}
+        ${r.flags.length?`<div style="margin-top:8px"><b data-t="flags">High-risk flags</b>: ${r.flags.map(f=>`<span class="chip" style="border-color:var(--high);color:var(--high)">🚩 ${esc(f)}</span>`).join(' ')}</div>`:''}
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3>✅ <span data-t="recommendations">Recommendations</span></h3>
+        <ul style="margin:0;padding-inline-start:20px">${(p.assessment.recommendations||[]).map(x=>`<li style="margin:5px 0">${esc(x)}</li>`).join('')||`<li class="muted">${t('noData')}</li>`}</ul>
+      </div>
+
+      <div class="row" style="margin-top:16px">
+        <div class="card grow" style="min-width:300px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <h3 data-t="assessmentHistory">Assessment History</h3>
+            <button class="btn btn-sm btn-primary" id="saveAsmt" data-t="saveAssessment">Save assessment</button>
+          </div>
+          <div id="asmtList" class="timeline" style="margin-top:10px"></div>
+        </div>
+        <div class="card grow" style="min-width:300px">
+          <h3 data-t="doctorNotes">Doctor Notes</h3>
+          <div class="row" style="gap:6px;margin:8px 0"><input id="dnInput" data-tph="addNote" class="grow"/><button class="btn btn-primary btn-sm" id="dnAdd" data-t="addNote">Add note</button></div>
+          <div id="dnList" style="max-height:200px;overflow:auto"></div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:16px">
+        <div class="card grow" style="min-width:300px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <h3 data-t="appointments">Follow-ups</h3>
+            <button class="btn btn-sm" id="schedFu">📅 <span data-t="scheduleFollowup">Schedule follow-up</span></button>
+          </div>
+          <div id="fuList" style="margin-top:10px"></div>
+        </div>
+        <div class="card grow" style="min-width:340px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <h3 data-t="adimeNote">ADIME Note</h3>
+            <button class="btn btn-sm btn-primary" id="genNote" data-t="generateAdime">Generate ADIME Note</button>
+          </div>
+          <pre id="noteOut" style="white-space:pre-wrap;font-size:13px;font-family:inherit;background:var(--surface-2);padding:14px;border-radius:10px;max-height:300px;overflow:auto">${t('noData')}</pre>
+          <div id="noteActions"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3 data-t="messages">Messages</h3>
+        <div id="msgs" style="max-height:240px;overflow:auto;padding:4px"></div>
+        <div class="row" style="margin-top:8px;gap:6px"><input id="msgInput" data-tph="typeMessage" class="grow"/><button class="btn btn-primary btn-sm" id="sendMsg" data-t="send">Send</button></div>
+      </div>`;
+    NC.setLang(NC.getLang());
+    document.getElementById('back').onclick = renderPatients;
+    document.getElementById('crumbHome').onclick = () => { current='dashboard'; document.querySelectorAll('.nav a').forEach(x=>x.classList.toggle('active',x.dataset.page==='dashboard')); document.getElementById('pageTitle').textContent=t('dashboard'); render(); };
+    document.getElementById('crumbPts').onclick = renderPatients;
+    document.getElementById('editP').onclick = () => patientModal(p);
+    document.getElementById('report').onclick = () => printReport(id);
+    document.getElementById('pExportCsv').onclick = () => NC.exportCSV(`${p.name.replace(/\s/g,'_')}.csv`, [{
+      Name:p.name, Code:p.patientCode, Age:p.ageDisplay, Gender:p.gender, BMI:p.bmi, Module:p.diseaseModule,
+      Diagnosis:p.diagnosis, RiskScore:r.score, RiskTier:r.tier.label, 'NRS-2002':r.nrs2002.score,
+      GLIM:r.glim.diagnosed?'met':'not met', Energy_kcal:tg.energyKcal, Protein_g:tg.proteinG, Sodium_mg:tg.sodiumMg, Adherence:p.adherence }]);
+    document.getElementById('genNote').onclick = (e) => NC.withLoading(e.target, async () => {
+      const res = await api('/patients/'+id+'/adime', { method:'POST', body:{ useLLM:true } });
+      document.getElementById('noteOut').textContent = res.note.text;
+      document.getElementById('noteActions').innerHTML = `<div style="margin-top:8px"><span class="badge tier-moderate" data-t="pendingApproval">Pending</span>
+        <button class="btn btn-sm btn-primary" id="approveBtn" data-t="approve">Approve</button> <span class="muted" style="font-size:12px">via ${esc(res.note.generatedBy)}</span></div>`;
+      NC.setLang(NC.getLang()); NC.toast(t('completed'), 'success');
+      document.getElementById('approveBtn').onclick = async (ev) => { await api('/notes/'+res.id+'/approve',{method:'POST'}); ev.target.outerHTML = `<span class="badge tier-low">✓ ${t('approved')}</span>`; NC.toast(t('saved'),'success'); };
+    });
+    document.getElementById('saveAsmt').onclick = (e) => NC.withLoading(e.target, async () => {
+      await api('/patients/'+id+'/assessment', { method:'POST' }); NC.toast(t('assessmentSaved'),'success'); loadAssessments(id);
+    });
+    document.getElementById('dnAdd').onclick = async () => {
+      const v = document.getElementById('dnInput').value.trim(); if(!v){ NC.toast(t('required'),'warn'); return; }
+      await api('/patients/'+id+'/doctor-notes', { method:'POST', body:{ body:v } });
+      document.getElementById('dnInput').value=''; NC.toast(t('noteAdded'),'success'); loadDoctorNotes(id);
+    };
+    document.getElementById('schedFu').onclick = () => scheduleFollowup(id);
+    loadMessages(id); loadAssessments(id); loadDoctorNotes(id); loadFollowups(id);
+    document.getElementById('sendMsg').onclick = async () => {
+      const v = document.getElementById('msgInput').value.trim(); if(!v) return;
+      await api('/messages/'+id, { method:'POST', body:{ body:v } }); document.getElementById('msgInput').value=''; loadMessages(id);
+    };
+  }
+  async function loadAssessments(id) {
+    const list = await api('/patients/'+id+'/assessments');
+    const el = document.getElementById('asmtList'); if(!el) return;
+    el.innerHTML = list.length ? list.map(a=>`<div class="ev"><div style="display:flex;justify-content:space-between;align-items:center">
+      <div><span class="badge tier-${a.tier}">${a.score}</span> <span class="muted" style="font-size:12px">${new Date(a.ts).toLocaleString()}</span></div>
+      <div><button class="btn btn-sm asmtCsv" data-id="${a.id}">⬇</button> <button class="btn btn-sm asmtDel" data-id="${a.id}">🗑️</button></div>
+      </div></div>`).join('') : `<p class="muted">${t('noData')}</p>`;
+    el.querySelectorAll('.asmtDel').forEach(b=>b.onclick=async()=>{ if(await NC.confirmDialog(t('deleteConfirm')+'?')){ await api('/assessments/'+b.dataset.id,{method:'DELETE'}); NC.toast(t('deleted'),'success'); loadAssessments(id);} });
+    el.querySelectorAll('.asmtCsv').forEach(b=>b.onclick=()=>{ const a=list.find(x=>x.id===b.dataset.id); NC.exportCSV('assessment.csv',[{ time:a.ts, score:a.score, tier:a.tier, bmi:a.bmi, energy:a.targets?.energyKcal, protein:a.targets?.proteinG }]); });
+  }
+  async function loadDoctorNotes(id) {
+    const list = await api('/patients/'+id+'/doctor-notes');
+    const el = document.getElementById('dnList'); if(!el) return;
+    el.innerHTML = list.length ? list.map(n=>`<div class="explain" style="display:flex;justify-content:space-between;gap:8px">
+      <div><b>${esc(n.author)}</b> <span class="muted" style="font-size:11px">${new Date(n.ts).toLocaleDateString()}</span><div>${esc(n.body)}</div></div>
+      <button class="btn btn-sm dnDel" data-id="${n.id}">🗑️</button></div>`).join('') : `<p class="muted">${t('noData')}</p>`;
+    el.querySelectorAll('.dnDel').forEach(b=>b.onclick=async()=>{ await api('/doctor-notes/'+b.dataset.id,{method:'DELETE'}); loadDoctorNotes(id); });
+  }
+  async function loadFollowups(id) {
+    const list = (await api('/appointments?patientId='+id));
+    const el = document.getElementById('fuList'); if(!el) return;
+    el.innerHTML = list.length ? list.map(a=>`<div class="explain" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <div><b>${new Date(a.when_ts).toLocaleString()}</b><div class="muted" style="font-size:12px">${esc(a.reason||'')}</div></div>
+      <div>${a.status==='completed'?`<span class="badge tier-low">✓ ${t('completed')}</span>`:`<button class="btn btn-sm fuDone" data-id="${a.id}">${t('markComplete')}</button>`}</div>
+      </div>`).join('') : `<p class="muted">${t('noData')}</p>`;
+    el.querySelectorAll('.fuDone').forEach(b=>b.onclick=async()=>{ await api('/appointments/'+b.dataset.id,{method:'PATCH',body:{status:'completed'}}); NC.toast(t('completed'),'success'); loadFollowups(id); });
+  }
+  function scheduleFollowup(id) {
+    const m = NC.modal(`
+      <div class="field"><label data-t="when">When</label><input type="datetime-local" id="fu_when"/><div class="err" id="fu_e"></div></div>
+      <div class="field"><label data-t="reason">Reason</label><input id="fu_reason" value="Nutrition follow-up"/></div>
+      <div class="row" style="justify-content:flex-end;gap:8px"><button class="btn nc-cancel" data-t="cancel">Cancel</button><button class="btn btn-primary" id="fu_save" data-t="save">Save</button></div>`,
+      { title: t('scheduleFollowup') });
+    NC.setLang(NC.getLang());
+    m.body.querySelector('.nc-cancel').onclick = m.close;
+    m.body.querySelector('#fu_save').onclick = (e) => NC.withLoading(e.target, async () => {
+      const when = m.body.querySelector('#fu_when').value;
+      if (!when) { m.body.querySelector('#fu_e').textContent = t('required'); return; }
+      await api('/appointments', { method:'POST', body:{ patientId:id, whenTs:new Date(when).toISOString(), reason:m.body.querySelector('#fu_reason').value } });
+      m.close(); NC.toast(t('followupScheduled'),'success'); loadFollowups(id);
+    });
+  }
+  async function loadMessages(id) {
+    const m = await api('/messages/'+id);
+    document.getElementById('msgs').innerHTML = m.map(x=>`<div class="msg ${x.sender}">${esc(x.body)}</div>`).join('') || `<p class="muted">${t('noData')}</p>`;
+  }
+
+  async function renderRisk() {
+    C.innerHTML = `<div class="row">
+      <div class="card grow" style="min-width:320px">
+        <h3 data-t="clinicalInputs">Clinical inputs</h3>
+        <div class="row">
+          <div class="field grow"><label data-t="name">Name</label><input id="f_name" value="New Patient"/></div>
+          <div class="field grow"><label data-t="height">Height (cm)</label><input type="number" id="f_h" value="170"/></div>
+          <div class="field grow"><label data-t="weight">Weight (kg)</label><input type="number" id="f_w" value="55"/>
+            <div class="muted" id="f_bmi" style="font-size:12px;margin-top:4px"></div></div>
+        </div>
+        <div class="row">
+          <div class="field grow"><label data-t="weightLoss">Weight loss %</label><input type="number" id="f_wl" value="8"/></div>
+          <div class="field grow"><label data-t="intakePct">Intake %</label><input type="number" id="f_in" value="60"/></div>
+        </div>
+        <div class="row">
+          <div class="field grow"><label data-t="albumin">Albumin</label><input type="number" step="0.1" id="f_alb" value="3.2"/></div>
+          <div class="field grow"><label data-t="crp">CRP</label><input type="number" id="f_crp" value="7"/></div>
+          <div class="field grow"><label data-t="severity">Severity 0–3</label><input type="number" id="f_sev" value="1" min="0" max="3"/></div>
+        </div>
+        <div class="row" style="align-items:center;gap:18px;margin-bottom:12px">
+          <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="f_icu" style="width:auto"/> <span data-t="icu">ICU</span></label>
+          <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="f_sarc" style="width:auto"/> <span data-t="sarcopenia">Low muscle mass</span></label>
+        </div>
+        <div class="field"><label data-t="saveAssessment">Save to patient (optional)</label>
+          <select id="f_patient"><option value="">—</option>${PATIENTS.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div>
+        <button class="btn btn-primary" id="runRisk" data-t="runPrediction">Predict Risk</button>
+      </div>
+      <div class="card grow" id="riskOut" style="min-width:300px"><p class="muted">${t('noData')}</p></div>
+    </div>`;
+    NC.setLang(NC.getLang());
+    const fH = document.getElementById('f_h'), fW = document.getElementById('f_w'), fBmi = document.getElementById('f_bmi');
+    const liveBmi = () => { const h=+fH.value, w=+fW.value; fBmi.textContent = (h>0&&w>0) ? `BMI ${(w/((h/100)**2)).toFixed(1)}` : ''; };
+    fH.oninput = liveBmi; fW.oninput = liveBmi; liveBmi();
+    document.getElementById('runRisk').onclick = (e) => NC.withLoading(e.target, async () => {
+      // Validate required fields
+      const h=+fH.value, w=+fW.value;
+      if (!(h>0) || !(w>0)) { NC.toast(t('fixErrors'), 'error'); fBmi.textContent = '⚠ ' + t('required'); return; }
+      const out = document.getElementById('riskOut');
+      // Animated AI analysis sequence
+      const steps = ['Validating inputs','Calculating BMI','Screening NRS-2002 & GLIM','Weighting risk factors','Generating recommendations'];
+      out.innerHTML = `<h4 data-t="analyzing">Analyzing…</h4><ul class="ai-steps">${steps.map((s,i)=>`<li id="st${i}"><span class="dot">${i+1}</span>${s}</li>`).join('')}</ul>`;
+      for (let i=0;i<steps.length;i++){ await new Promise(r=>setTimeout(r,260)); document.getElementById('st'+i)?.classList.add('done'); }
+      const body = { name:f_name.value, heightCm:h, weightKg:w, weightLossPct:f_wl.value,
+        intakePctOfNeeds:f_in.value, albumin:f_alb.value, crp:f_crp.value, diagnosisSeverity:f_sev.value,
+        icu:f_icu.checked, sarcopenia:f_sarc.checked };
+      let risk, recs = [];
+      const pid = document.getElementById('f_patient').value;
+      if (pid) { // save to that patient's history (updates their record + history)
+        await api('/patients/'+pid, { method:'PUT', body });
+        const saved = await api('/patients/'+pid+'/assessment', { method:'POST' });
+        risk = saved.assessment.risk; recs = saved.assessment.recommendations;
+        NC.toast(t('assessmentSaved'),'success');
+      } else {
+        const res = await api('/risk/predict', { method:'POST', body }); risk = res.risk; recs = res.recommendations||[];
+      }
+      out.innerHTML = `<div style="text-align:center">${riskGauge(risk.score, risk.tier.key)}
+        <div style="margin-top:6px"><span class="badge tier-${risk.tier.key}">${risk.tier.label}</span></div></div>
+        <p style="margin-top:10px">${esc(risk.explanation)}</p>
+        <b data-t="flags">Flags</b>: ${risk.flags.map(f=>`<span class="chip">🚩 ${esc(f)}</span>`).join(' ')||'—'}
+        <h4 style="margin-top:14px" data-t="riskFactors">Risk factors</h4>
+        ${risk.factors.map(f=>`<div class="explain"><b>${esc(f.label)}</b> +${f.points} <span class="muted">(${esc(f.value)})</span></div>`).join('')||`<p class="muted">${t('noData')}</p>`}
+        ${recs.length?`<h4 style="margin-top:14px" data-t="recommendations">Recommendations</h4><ul style="padding-inline-start:20px">${recs.map(x=>`<li style="margin:4px 0">${esc(x)}</li>`).join('')}</ul>`:''}
+        <div class="muted" style="font-size:12px;margin-top:8px">NRS-2002: ${risk.nrs2002.score} · GLIM: ${risk.glim.diagnosed?'met':'not met'}</div>`;
+      NC.setLang(NC.getLang());
+      NC.toast(t('completed'),'success');
+    });
+  }
+
+  async function renderFoods() {
+    C.innerHTML = `<div class="card">
+      <div class="row" style="gap:8px;margin-bottom:12px">
+        <input id="foodSearch" data-tph="search" class="grow"/>
+        <select id="foodPatient"><option value="">${t('screen')}…</option>${PATIENTS.map(p=>`<option value="${p.id}">${esc(p.name)} (${esc(p.diseaseModule||'-')})</option>`).join('')}</select>
+      </div>
+      <div id="foodList"></div></div>`;
+    NC.setLang(NC.getLang());
+    const load = async () => {
+      const q = document.getElementById('foodSearch').value, pid = document.getElementById('foodPatient').value;
+      const d = await api('/foods?limit=60&search='+encodeURIComponent(q)+(pid?'&patientId='+pid:''));
+      document.getElementById('foodList').innerHTML = `<table><thead><tr><th data-t="name">Food</th><th>kcal</th><th>Na</th><th>K</th><th>P</th><th>SatFat</th>${pid?`<th data-t="verdict">Verdict</th>`:''}</tr></thead><tbody>
+        ${d.foods.map(f=>{const s=f.screen; const vc=s?(s.verdict==='avoid'?'v-avoid':s.verdict==='caution'?'v-caution':'v-allow'):'';
+          return `<tr><td><b>${esc(f.name)}</b><div class="muted" style="font-size:12px">${esc(f.nameAr||'')} · ${esc(f.category)}</div></td>
+          <td>${f.kcal}</td><td>${f.sodium}</td><td>${f.potassium}</td><td>${f.phosphorus}</td><td>${f.satFat}g</td>
+          ${pid?`<td class="${vc}"><b>${s.verdict.toUpperCase()}</b>${s.violations[0]?`<div class="muted" style="font-size:11px">${esc(s.violations[0].rule)}</div>`:''}</td>`:''}</tr>`;}).join('')}
+      </tbody></table>`;
+      NC.setLang(NC.getLang());
+    };
+    document.getElementById('foodSearch').oninput = load; document.getElementById('foodPatient').onchange = load; load();
+  }
+
+  async function renderModules() {
+    MODULES = await api('/disease-modules');
+    C.innerHTML = `<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+      ${Object.values(MODULES).map(m=>`<div class="card">
+        <h3>${esc(m.name)} <span class="muted" style="font-size:13px;font-weight:400">${esc(m.nameAr||'')}</span></h3>
+        <span class="chip">${esc(m.guideline)}</span>
+        <p class="muted" style="font-size:13px;margin-top:10px"><b>Key labs:</b> ${(m.keyLabs||[]).join(', ')}</p>
+        ${m.stages?`<p style="font-size:13px"><b>Stages:</b> ${m.stages.map(s=>s.stage).join(', ')}</p>`:''}
+        ${m.types?`<p style="font-size:13px"><b>Types:</b> ${m.types.map(x=>x.key).join(', ')}</p>`:''}
+        ${m.critical?`<span class="badge tier-critical">Critical · neonatal screening</span>`:''}
+      </div>`).join('')}</div>`;
+  }
+
+  async function renderAppointments() {
+    const a = await api('/appointments');
+    C.innerHTML = `<div class="card"><table><thead><tr><th>Patient</th><th data-t="when">When</th><th data-t="reason">Reason</th><th>Status</th></tr></thead><tbody>
+      ${a.map(x=>{const p=PATIENTS.find(p=>p.id===x.patient_id);return `<tr><td>${esc(p?p.name:x.patient_id)}</td><td>${new Date(x.when_ts).toLocaleString()}</td><td>${esc(x.reason)}</td><td><span class="badge tier-low">${esc(x.status)}</span></td></tr>`;}).join('')||`<tr><td colspan=4 class="muted">${t('noData')}</td></tr>`}
+    </tbody></table></div>`;
+    NC.setLang(NC.getLang());
+  }
+
+  async function printReport(id) {
+    const rep = await api('/patients/'+id+'/report');
+    const p = rep.patient, r = rep.assessment.risk, tg = rep.assessment.targets;
+    const w = window.open('', '_blank');
+    w.document.write(`<html><head><title>Report — ${esc(p.name)}</title>
+      <style>body{font-family:Inter,sans-serif;padding:30px;color:#1a2233;max-width:800px;margin:auto}
+      h1{color:#0d9488}.box{border:1px solid #e4e9f2;border-radius:12px;padding:16px;margin:12px 0}
+      table{width:100%;border-collapse:collapse}td,th{padding:6px;border-bottom:1px solid #eee;text-align:left}
+      .badge{padding:3px 10px;border-radius:99px;background:#0d948822;color:#0d9488;font-weight:700}</style></head><body>
+      <h1>NutriCare AI — Clinical Nutrition Report</h1>
+      <p><b>${esc(p.name)}</b> · ${esc(p.patientCode||'')} · ${esc(p.ageDisplay||'')} · ${esc(p.gender||'')}<br/>${esc(p.diagnosis||'')}</p>
+      <div class="box"><h3>Executive Summary</h3>Malnutrition risk <span class="badge">${r.score}/100 · ${r.tier.label}</span> — ${esc(r.explanation)}</div>
+      <div class="box"><h3>Anthropometrics</h3>Weight ${p.weightKg} kg · Height ${p.heightCm} cm · BMI ${p.bmi}</div>
+      <div class="box"><h3>Nutrition Targets</h3><table>
+        <tr><td>Energy</td><td>${tg.energyKcal} kcal/day</td></tr><tr><td>Protein</td><td>${tg.proteinG} g/day</td></tr>
+        <tr><td>Sodium</td><td>&lt;${tg.sodiumMg} mg</td></tr>${tg.potassiumMg?`<tr><td>Potassium</td><td>&lt;${tg.potassiumMg} mg</td></tr>`:''}
+        ${tg.phosphorusMg?`<tr><td>Phosphorus</td><td>&lt;${tg.phosphorusMg} mg</td></tr>`:''}<tr><td>Fluid</td><td>${esc(tg.fluid)}</td></tr></table></div>
+      <div class="box"><h3>ADIME Note</h3><pre style="white-space:pre-wrap;font-family:inherit">${esc(rep.adime.text)}</pre></div>
+      <p style="color:#64748b;font-size:12px">${esc(NC.t('disclaimer'))} · Generated ${new Date().toLocaleString()}</p>
+      </body></html>`);
+    w.document.close(); setTimeout(()=>w.print(), 400);
+  }
+
+  loadAndRender();
+  </script>
+</body>
+</html>
