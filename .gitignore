@@ -1,0 +1,20 @@
+node_modules/
+*.log
+.DS_Store
+
+# database
+*.db
+*.db-shm
+*.db-wal
+
+# env
+.env
+
+# archive
+_archive/
+
+# docs
+*.docx
+*.pptx
+*.pdf
+*.xlsx
